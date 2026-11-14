@@ -1,0 +1,24 @@
+{
+  "name": "combi-wf",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "test": "pnpm --filter @combi/canvas-core test",
+    "typecheck": "pnpm -r typecheck",
+    "agent:demo": "pnpm --filter @combi/server agent:demo"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}
