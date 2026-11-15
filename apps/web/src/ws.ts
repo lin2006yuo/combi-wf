@@ -6,7 +6,7 @@ import type {
   ServerMessage,
 } from '@combi/canvas-core'
 import { CANVAS_TOKEN, DOC_ID, SERVER_URL } from './api'
-import { useAppStore } from './store'
+import { graph } from './graph/state'
 
 type Resolved = AppliedMessage | CommandResultMessage
 
@@ -49,15 +49,14 @@ function open(): void {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
     return
   }
-  const store = useAppStore.getState()
-  store.setStatus('connecting')
+  graph.setStatus('connecting')
 
   const ws = new WebSocket(websocketUrl())
   socket = ws
 
   ws.onopen = () => {
     attempts = 0
-    useAppStore.getState().setStatus('open')
+    graph.setStatus('open')
   }
 
   ws.onmessage = (event) => {
@@ -70,7 +69,7 @@ function open(): void {
 
   ws.onclose = () => {
     if (socket === ws) socket = null
-    useAppStore.getState().setStatus('closed')
+    graph.setStatus('closed')
     rejectAll(new Error('连接已断开，正在重连'))
     if (!started) return
     attempts += 1
@@ -88,13 +87,12 @@ function open(): void {
 }
 
 function handleMessage(message: ServerMessage): void {
-  const store = useAppStore.getState()
   switch (message.type) {
     case 'snapshot':
-      store.setSnapshot(message)
+      graph.applySnapshot(message)
       break
     case 'applied':
-      store.applyMessage(message)
+      graph.applyApplied(message)
       settle(message.requestId, (entry) => entry.resolve(message))
       break
     case 'command.result':
@@ -102,21 +100,18 @@ function handleMessage(message: ServerMessage): void {
       break
     case 'command.error':
       settle(message.requestId, (entry) => entry.reject(new Error(message.error.message)))
-      store.toast(message.error.message, 'error')
+      graph.toast(message.error.message, 'error')
       break
     case 'runtime':
-      store.setRuntime(message.nodeId, message.runtime)
+      graph.setRuntime(message.nodeId, message.runtime)
       break
     case 'toast':
-      store.toast(message.message, message.level)
+      graph.toast(message.message, message.level)
       break
   }
 }
 
-function settle(
-  requestId: string | undefined,
-  callback: (entry: Pending) => void,
-): void {
+function settle(requestId: string | undefined, callback: (entry: Pending) => void): void {
   if (!requestId) return
   const entry = pending.get(requestId)
   if (!entry) return

@@ -1,5 +1,5 @@
 import { History, Redo2, Undo2 } from 'lucide-react'
-import { useAppStore } from '../store'
+import { useHistoryModel } from '../graph/hooks'
 
 const SOURCE_META: Record<string, { label: string; className: string }> = {
   user: { label: '你', className: 'user' },
@@ -9,10 +9,9 @@ const SOURCE_META: Record<string, { label: string; className: string }> = {
 }
 
 export function HistoryPanel() {
-  const entries = useAppStore((state) => state.history)
-  const cursor = useAppStore((state) => state.cursor)
+  const { history, appliedCount, canUndo, canRedo } = useHistoryModel()
 
-  if (entries.length === 0) {
+  if (history.length === 0) {
     return (
       <div className="empty-panel">
         <span className="empty-icon">
@@ -24,23 +23,25 @@ export function HistoryPanel() {
     )
   }
 
+  const undoneCount = history.length - appliedCount
+
   return (
     <div className="history-panel">
       <div className="history-summary">
         <span>
-          <Undo2 size={12} /> {cursor} 条已应用
+          <Undo2 size={12} /> {appliedCount} 条已应用
         </span>
         <span>
-          <Redo2 size={12} /> {entries.length - cursor} 条可重做
+          <Redo2 size={12} /> {undoneCount} 条可重做
         </span>
       </div>
 
       <div className="history-list">
-        {[...entries].reverse().map((entry, reverseIndex) => {
-          const index = entries.length - 1 - reverseIndex
+        {[...history].reverse().map((entry, reverseIndex) => {
+          const index = history.length - 1 - reverseIndex
           const meta = SOURCE_META[entry.source] ?? SOURCE_META.system
-          const undone = index >= cursor
-          const current = index === cursor - 1
+          const undone = entry.status === 'undone'
+          const current = index === appliedCount - 1
           return (
             <div
               key={entry.id}
@@ -69,6 +70,7 @@ export function HistoryPanel() {
 
       <div className="panel-footnote">
         历史只记录文档意图（结构 + 参数）。生成进度、输出、stale 属于执行面，不进入撤销栈。
+        {!canUndo && !canRedo ? ' 当前没有可撤销/重做的操作。' : ''}
       </div>
     </div>
   )

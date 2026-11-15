@@ -1,25 +1,24 @@
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
-  CanvasEngine,
-  type EngineSnapshot,
+  CommandLog,
+  type CommandLogSnapshot,
   type NodeRegistry,
 } from '@combi/canvas-core'
 import { createSeedDoc } from './seed'
 import { sanitizeDocId } from './util'
 
 /**
- * 骨架阶段用 JSON 文件持久化：doc + 历史 patch + cursor。
- * 生产替换为 Postgres（文档行 + command_log 表）时，接口不变。
+ * 骨架阶段用 JSON 文件持久化：doc + command log。
+ * 生产替换为 Postgres（documents + command_log）时，CommandLog 接口不变。
  */
 export class DocStore {
-  private readonly engines = new Map<string, CanvasEngine>()
+  private readonly logs = new Map<string, CommandLog>()
   private readonly timers = new Map<string, NodeJS.Timeout>()
 
   constructor(
     private readonly dir: string,
     private readonly registry: NodeRegistry,
-    private readonly historyLimit = 100,
   ) {}
 
   async init(): Promise<void> {
@@ -30,12 +29,9 @@ export class DocStore {
       const path = join(this.dir, file)
       try {
         const raw = await readFile(path, 'utf8')
-        const snapshot = JSON.parse(raw) as EngineSnapshot
+        const snapshot = JSON.parse(raw) as CommandLogSnapshot
         const docId = sanitizeDocId(snapshot.doc?.id)
-        const engine = CanvasEngine.fromSnapshot(this.registry, snapshot, {
-          historyLimit: this.historyLimit,
-        })
-        this.engines.set(docId, engine)
+        this.logs.set(docId, CommandLog.fromSnapshot(this.registry, snapshot))
       } catch (error) {
         console.warn(`[store] 跳过无法读取的文档 ${file}:`, (error as Error).message)
       }
@@ -43,22 +39,21 @@ export class DocStore {
   }
 
   has(docId: string): boolean {
-    return this.engines.has(sanitizeDocId(docId))
+    return this.logs.has(sanitizeDocId(docId))
   }
 
-  get(docIdInput: string): CanvasEngine {
+  get(docIdInput: string): CommandLog {
     const docId = sanitizeDocId(docIdInput)
-    let engine = this.engines.get(docId)
-    if (!engine) {
-      engine = new CanvasEngine({
+    let log = this.logs.get(docId)
+    if (!log) {
+      log = new CommandLog({
         doc: createSeedDoc(docId, this.registry),
         registry: this.registry,
-        historyLimit: this.historyLimit,
       })
-      this.engines.set(docId, engine)
+      this.logs.set(docId, log)
       this.save(docId)
     }
-    return engine
+    return log
   }
 
   save(docId: string): void {
@@ -74,12 +69,12 @@ export class DocStore {
   }
 
   private async persist(docId: string): Promise<void> {
-    const engine = this.engines.get(docId)
-    if (!engine) return
+    const log = this.logs.get(docId)
+    if (!log) return
     const path = join(this.dir, `doc-${docId}.json`)
     const tmp = `${path}.tmp`
     try {
-      await writeFile(tmp, JSON.stringify(engine.toSnapshot(), null, 2), 'utf8')
+      await writeFile(tmp, JSON.stringify(log.toSnapshot(), null, 2), 'utf8')
       await rename(tmp, path)
     } catch (error) {
       console.error(`[store] 持久化失败 ${docId}:`, error)
@@ -89,6 +84,6 @@ export class DocStore {
   async flush(): Promise<void> {
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
-    await Promise.all([...this.engines.keys()].map((docId) => this.persist(docId)))
+    await Promise.all([...this.logs.keys()].map((docId) => this.persist(docId)))
   }
 }

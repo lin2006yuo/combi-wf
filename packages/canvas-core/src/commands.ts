@@ -73,7 +73,7 @@ export interface HistoryUndoCommand extends CommandBase {
 
 export interface HistoryRedoCommand extends CommandBase {
   type: 'history.redo'
-  payload?: Record<string, never>
+  payload?: { entryId?: string }
 }
 
 export interface NodeRunCommand extends CommandBase {

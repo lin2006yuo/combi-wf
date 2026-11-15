@@ -1,55 +1,98 @@
-# Combi Flow 架构设计
+# Combi Flow 架构设计 v0.2
 
-> 状态：v0.1 骨架已落地（2026-11-14）。
-> 本文是设计基线，不是营销文档。实现与设计的差距统一记录在 `docs/STATUS.md`。
+> 状态：signals 重构已完成（2026-11-15）。
+> 设计基线，不是营销文档。实现边界统一记录在 `docs/STATUS.md`。
 
 ---
 
 ## 0. 一句话
 
-把 AI 短视频画布拆成 **文档面 / 交互面 / 执行面** 三个平面；**Command 是唯一写入口**；历史记录命令产生的 **patch**；MCP Agent 只是另一个 Command 生产者。
+把画布拆成 **文档面 / 视图面 / 执行面**；服务端拥有 **doc + change log**，前端拥有 **undo stack**；React Flow 只是 renderer adapter，节点通过 **per-record signal** 订阅。
 
 ---
 
 ## 1. 为什么不是「给画布加个 undo」
 
-这个产品的 undo 有三个特殊约束，普通图形编辑器没有：
+AI 短视频工作流有三个普通图编辑器没有的约束：
 
-1. **拖拽是连续的**：一次拖动产生几十次 position 变更，但用户心智里只有「一次移动」。
-2. **生成是异步且花钱的**：视频节点是分钟级任务，有 progress、output、stale、费用。
-3. **Agent 没有「变更」，只有「意图」**：它调用的是 `move_nodes` / `batch`，不是 60 帧坐标。
+1. 拖拽是连续的：一次拖动几十帧，但用户心智里只有一次移动。
+2. 生成是异步且花钱的：job、progress、output、stale 属于执行面。
+3. Agent 没有「变更」，只有「意图」：它调用 `batch` / `move_nodes`，不是帧。
 
-如果监听 store 写入来做历史，第 1 条会让撤销栈被帧淹没；如果执行状态进入文档，第 2 条会让撤销把 `succeeded` 回滚成 `queued`，状态机直接坏掉；如果 Agent 直接改数据库，第 3 条会让它绕过校验、审计和预算。
-
-所以核心不是「加一个 undo 栈」，而是**先定义写入口和平面边界**。
+所以核心不是 undo 栈，而是先定义 **写入口、事实来源、更新粒度**。
 
 ---
 
 ## 2. 三个平面
 
-| 平面 | 内容 | 持久化 | 进 undo | 谁写 |
+| 平面 | 内容 | 持久化 | 进历史 | 谁写 |
 |---|---|---|---|---|
-| **文档面** | nodes、edges、params、label、端口连接 | ✅ | ✅ | Command |
-| **交互面** | selection、hover、拖拽 preview、viewport、输入框草稿、面板开合 | ❌（视图状态可按用户存） | ❌ | UI 本地 |
-| **执行面** | job 状态、progress、output 资产、耗时、stale、日志 | 独立表 / 当前为内存 | ❌ | 执行引擎事件 |
+| **文档面** | nodes、edges、params、label | ✅ 服务端 | ✅ | Command |
+| **视图面** | position preview、selection、viewport、拖拽中间帧 | ❌ | ❌ | 客户端 Graph Runtime / React Flow |
+| **执行面** | job、progress、output、stale、日志 | 独立状态 | ❌ | 执行引擎 |
 
-三条硬规则：
+硬规则：
 
-1. **执行面永不写进 `CanvasDoc` 或 `HistoryEntry`。**
-2. **派生状态不存历史**：`stale` 由「当前输入签名」与「产出时的输入签名」比较得到，只存在于 runtime。
-3. **拖拽的中间帧不出浏览器**：松手才发一条 `node.move`。
-
-违反第 1 条的典型症状：Agent 每 2 秒轮询一次任务，历史栈里出现几百条「修改 status」；Ctrl+Z 把正在跑的任务撤成排队。
+1. 执行面不写进 `CanvasDoc` 或 `HistoryEntry`。
+2. 派生状态（stale）不存历史，只存在 runtime。
+3. 拖拽中间帧不出浏览器，松手才发一条 `node.move`。
 
 ---
 
-## 3. 总体架构
+## 3. 一致性模型
+
+### 3.1 服务端是事实来源
+
+```
+S0 --c1--> S1 --c2--> S2 --c3--> S3 ...
+```
+
+- 服务端串行应用命令，给每条命令分配单调递增的 `seq`。
+- 文档是 `CanvasDoc`，`rev` 每次成功变更 +1。
+- `CommandLog` 保存每条命令的 `forward` / `inverse` patch、来源、actor、状态。
+- 所有客户端从同一个 `S0` 开始，按 `seq` 应用同样的 patch，因此文档收敛。
+
+### 3.2 前端拥有 undo stack
+
+- 服务端不再维护全局 undo cursor。
+- 客户端从 `snapshot` / `applied` 构建 `history`，`cursor` = 已应用 entry 数。
+- 撤销时客户端发 `{ type: 'history.undo', payload: { entryId } }`。
+- 服务端校验：目标 entry 必须是当前栈顶 applied，且没有被更新命令覆盖；通过则应用 inverse，把 entry 标为 `undone`。
+- 重做：客户端发最早一条 `undone` 的 entryId；服务端应用 forward，把状态改回 `applied`。
+- 新命令到来时，服务端把 redo 分支标为 `discarded`，客户端清空重做区。
+
+这不是「前端存事实」，而是：
+
+| 概念 | 归属 |
+|---|---|
+| 当前文档 | 服务端 |
+| 变更日志（事实） | 服务端 |
+| 撤销栈 / cursor / 分组 | 客户端 |
+| 用户看到的「可撤销 / 可重做」 | 客户端 |
+
+### 3.3 为什么这样收敛
+
+- 文档收敛只依赖：**全序 log + 确定性 apply**。
+- undo / redo 也是 log 上的受控操作，不是客户端本地回滚。
+- 客户端的 cursor 不同，不会导致文档不同；它只是每个会话的视图。
+- 多客户端同时撤销时，服务端串行校验；后到者返回 `OUT_OF_ORDER_UNDO`，客户端 resync。
+
+### 3.4 尚未做的
+
+- 离线编辑。当前是服务端权威、客户端在线。
+- 多客户端/多 Agent 的字段级冲突合并。当前是 LIFO + 409。
+- CRDT。如果未来离线/多人实时编辑是硬需求，再评估；业务校验仍留在 Command 层。
+
+---
+
+## 4. 总体架构
 
 ```
 ┌──────────────────────────┐        ┌──────────────────────────┐
 │ Web                      │        │ External Agent           │
 │ React 18 + React Flow 12 │        │ Claude / Cursor / 自研    │
-│ Zustand (doc/ui/runtime) │        │ MCP Streamable HTTP      │
+│ @preact/signals-core     │        │ MCP Streamable HTTP      │
+│ Graph Runtime / undo     │        │                          │
 └───────────┬──────────────┘        └───────────┬──────────────┘
             │ WS: command / snapshot             │ tools/call
             │ HTTP: commands（脚本/集成）         │
@@ -57,28 +100,26 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ Canvas Service (Node + Fastify)                             │
 │                                                             │
-│  validate → authorize → apply → append log → broadcast      │
+│  validate → apply → append log → broadcast                  │
 │                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐  │
-│  │ Command Bus  │  │ History      │  │ Execution Engine  │  │
-│  │ (唯一入口)    │  │ (patch log)  │  │ (job / stale)     │  │
-│  └──────┬───────┘  └──────────────┘  └─────────┬─────────┘  │
-│         │                                       │            │
-│         ▼                                       ▼            │
-│  ┌──────────────┐                        ┌─────────────┐     │
-│  │ DocStore     │  JSON（骨架）→ PG       │ 模拟 provider │     │
-│  │ doc + log    │                        │ 未来：队列    │     │
-│  └──────────────┘                        └─────────────┘     │
+│  │ CommandLog   │  │ Execution    │  │ MCP tools         │  │
+│  │ doc + log    │  │ jobs / stale │  │ agent gateway     │  │
+│  └──────┬───────┘  └──────┬───────┘  └───────────────────┘  │
+│         │                 │                                  │
+│         ▼                 ▼                                  │
+│  ┌──────────────┐   ┌─────────────┐                         │
+│  │ DocStore     │   │ 模拟 provider│                         │
+│  │ JSON → PG    │   │ 未来：队列   │                         │
+│  └──────────────┘   └─────────────┘                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-关键点：**MCP 不直连数据库，也不直连执行引擎。** 它和 UI 一样，只是 Command 的生产者。
+关键：MCP 不直连数据库，也不直连执行引擎。它和 UI 一样是 Command 生产者。
 
 ---
 
-## 4. 文档模型
-
-归一化存储，方便 patch、精确寻址和 Agent 操作：
+## 5. 文档模型
 
 ```ts
 interface CanvasDoc {
@@ -89,43 +130,25 @@ interface CanvasDoc {
   nodeOrder: NodeId[]
   edgeOrder: EdgeId[]
 }
-
-interface CanvasNode {
-  id: string
-  type: string
-  position: { x: number; y: number }
-  data: {
-    label?: string
-    params: Record<string, unknown>
-  }
-}
-
-interface CanvasEdge {
-  id: string
-  source: string
-  sourcePort: string
-  target: string
-  targetPort: string
-}
 ```
 
-- `nodeOrder` / `edgeOrder` 是渲染顺序，也是多输入端口（组合节点的 clips）的拼接顺序。
-- 资产只存 URL / hash，不存 base64。
-- `rev` 是服务端文档版本，每次成功命令 +1，客户端用它判断是否需要 resync。
+- `nodeOrder` / `edgeOrder` 是渲染顺序，也是 `compose.clips` 的拼接顺序。
+- 资产只存 URL / hash。
+- `rev` 是服务端文档版本，客户端用它判断是否需要 resync。
 
-当前节点类型：
+节点类型：
 
 | type | 输入 | 输出 | 关键参数 |
 |---|---|---|---|
 | `image.gen` | — | image | prompt、model、aspectRatio、seed |
-| `video.gen` | image（首帧，可选） | video | prompt、model、duration、aspectRatio、motion |
-| `compose` | video（clips，多输入、有序）、audio（music，可选） | video | transition、resolution、bgmVolume、mute |
+| `video.gen` | image（首帧） | video | prompt、model、duration、aspectRatio、motion |
+| `compose` | video（clips，多输入）、audio（music） | video | transition、resolution、bgmVolume、mute |
 
 ---
 
-## 5. Node Registry 是单一事实源
+## 6. Node Registry
 
-同一个定义同时驱动：属性面板、端口校验、执行器、MCP 的 `list_node_types`、默认参数。
+同一个定义驱动：属性面板、端口校验、执行器、MCP 的 `list_node_types`、默认参数。
 
 ```ts
 const videoGenNode: NodeDefinition<typeof videoParams> = {
@@ -133,83 +156,41 @@ const videoGenNode: NodeDefinition<typeof videoParams> = {
   title: '视频生成',
   inputs: [{ id: 'firstFrame', label: '首帧', type: 'image', required: false }],
   outputs: [{ id: 'video', label: '视频', type: 'video' }],
-  params: z.object({
-    prompt: z.string().min(1),
-    model: z.enum(['kling-2.1', 'runway-gen4']),
-    duration: z.union([z.literal(5), z.literal(10)]),
-    // ...
-  }),
-  defaults: { /* ... */ },
-  ui: {
-    accent: '#06b6d4',
-    icon: 'video',
-    fields: [/* 属性面板描述 */],
-  },
+  params: z.object({ prompt: z.string(), model: z.enum([...]) }),
+  defaults: { ... },
+  ui: { accent: '#06b6d4', icon: 'video', fields: [...] },
 }
 ```
 
-为什么要有 `ui.fields`：zod 负责校验，但它不擅长推导「这个 enum 应该渲染成下拉、这个数字是 1–10 的滑块」。把 UI 描述留在 registry，避免每个面板手写一遍。
-
-**组合节点**的 `clips` 端口是 `multi: true`，允许接多条边；`edgeOrder` 决定拼接顺序。端口类型不兼容、单输入端口被占用、成环，都会在 Command 层被拒绝。
+端口类型不兼容、单输入端口被占用、成环，都在 Command 层拒绝。
 
 ---
 
-## 6. Command 是唯一写入口
+## 7. Command
 
 ```ts
-interface CommandBase {
-  id?: string          // 幂等键，客户端生成
-  docId?: string
-  source?: 'user' | 'agent' | 'undo' | 'system'
-  actorId?: string     // userId / agent session
-  ts?: number
-  label?: string       // 覆盖历史面板文案
-}
-
 type Command =
   | { type: 'node.add'; payload: { node: {...} } }
   | { type: 'node.move'; payload: { moves: Array<{ id, position }> } }
   | { type: 'node.update'; payload: { id, params?, label? } }
   | { type: 'node.delete'; payload: { ids: string[] } }
-  | { type: 'edge.connect'; payload: { source, sourcePort?, target, targetPort? } }
+  | { type: 'edge.connect'; payload: {...} }
   | { type: 'edge.disconnect'; payload: { ids: string[] } }
   | { type: 'batch'; payload: { ops: DocumentCommand[] } }
   | { type: 'history.undo' | 'history.redo' }
   | { type: 'node.run' | 'graph.run' | 'job.cancel' }
 ```
 
-### 语义
+- **意图粒度**：`node.move` 接收最终坐标数组，不是 dx/dy。
+- **batch 是事务**：内部可先 add 再 connect；失败整体回滚。
+- **run 不是文档命令**：由执行引擎处理，不产生历史。
+- **undo/redo 也是命令**：服务端校验后应用 patch，广播给所有客户端。
 
-- **意图粒度**：`moveNodes` 接收最终坐标数组，不是「dx=5」的增量。
-- **一次 Command = 一次原子变更**：校验失败不会留下半个图，Immer 的 draft 直接丢弃。
-- **batch 是一个事务**：内部可以「先 add 再 connect 到这个新节点」，因为校验和变更都发生在同一个 draft 上；任何一步失败，整体回滚。
-- **run 命令不是文档命令**：`node.run` / `graph.run` / `job.cancel` 由执行引擎处理，不产生历史。
-- **undo/redo 也是 Command**：它们由历史层转成 patch 应用，因此同样走广播、持久化和审计。
-
-### 校验（全部在服务端）
-
-- 节点类型存在、参数过 zod。
-- 节点 / 连线存在。
-- 端口存在、类型兼容（`image` 不能接 `video`）。
-- 单输入端口只能一条边；多输入端口可多条。
-- 禁止自环、禁止成环（DFS）。
-- 删除节点级联删除相关边。
-
-### 为什么命令里带 `source`
-
-统一历史栈里，用户、Agent、撤销、系统操作是混在一起的。`source` 让：
-
-- 历史面板区分「你 / Agent / 系统」。
-- Agent 只能通过 `undo_my_last` 撤销自己最后一步，不能误伤用户。
-- 未来的同步 / 自动优化逻辑可以过滤 `source: 'undo'`，避免「撤销触发重新生成」的死循环。
+校验：节点/边存在、参数过 zod、端口类型、单/多输入、自环/成环、级联删除。
 
 ---
 
-## 7. 历史层
-
-### 表示：patch，不是快照
-
-使用 Immer `produceWithPatches`，每条历史保存正向与反向 patch：
+## 8. CommandLog（服务端历史）
 
 ```ts
 interface HistoryEntry {
@@ -219,70 +200,111 @@ interface HistoryEntry {
   type: string
   source: 'user' | 'agent' | 'undo' | 'system'
   actorId?: string
-  label: string          // "移动 2 个节点"
+  label: string
   forward: Patch[]
   inverse: Patch[]
   nodes: string[]
   edges: string[]
   ts: number
+  status: 'applied' | 'undone' | 'discarded'
 }
 ```
 
-为什么不用全量快照：
+- `apply`：校验 → `produceWithPatches` → 追加 entry（applied）→ 清除 redo 分支（标 discarded）。
+- `undo(entryId)`：目标必须是 **最后一个 applied entry**；应用 inverse，标 undone。
+- `redo(entryId)`：目标必须是 **最早一个 undone entry**；应用 forward，标 applied。
+- 历史按 LIFO；客户端 cursor 是视图，服务端负责校验。
+- 每个 entry 的 patch 只影响被触及的节点/边，不会全图快照。
 
-- 300 节点 × 100 条历史 = 30000 个节点对象常驻内存；patch 只存变化字段。
-- 快照撤销通常直接替换数组，容易绕过业务事件；patch 是显式的数据变更。
-- Agent 场景下需要审计和重放，patch log 本身就是操作日志。
+**为什么前端不存唯一 log：**
 
-### 边界：由意图结束定义，不由时间猜
-
-| 操作 | 边界 |
-|---|---|
-| 拖节点 | `onNodeDragStart` 本地 preview → `onNodeDragStop` 发一条 `node.move` |
-| 拖滑块 | pointerdown 暂停记录 → pointerup 提交（当前骨架未接滑块） |
-| 打字 | 输入框本地草稿 → blur / ⌘Enter 提交一条 `node.update` |
-| 删除 | 一条 `node.delete`，级联边在同一个 patch 里 |
-| Agent 多步 | 一次 `batch` 工具调用 = 一个事务 = 一条历史 |
-| 未来多步 UI | `txId` 分组（协议已预留，当前主要用 batch） |
-
-**不用 `throttle` / `debounce` 猜边界。** 拖 3 秒和拖 10 秒都只产生一条；打字快慢不影响历史条数。
-
-### 栈形态
-
-线性历史 + cursor：
-
-```
-entries: [E1, E2, E3, E4]   cursor = 4  （全部已应用）
-undo → cursor = 3
-redo → cursor = 4
-新命令 → 截断 cursor 之后的 E4，再 push
-```
-
-- 普通命令：`entry` 追加，`cursor++`。
-- undo：应用 `entry.inverse`，`cursor--`，entry 保留供 redo。
-- redo：应用 `entry.forward`，`cursor++`。
-- 上限默认 100，超出丢弃最旧。
-- 当前**只支持 LIFO**：显式撤销一个非栈顶 entry 会返回 `OUT_OF_ORDER_UNDO`。
-
-### 撤销 stale entry（当前策略）
-
-单用户 + Agent 的场景下，撤销总是栈顶，理论上不会覆盖后续修改。若未来支持点击历史面板跳到任意点，需要按字段级版本做冲突检测（见 `docs/STATUS.md` 的下一步）。
-
-### 为什么历史在服务端
-
-Agent 在没有浏览器的时候也会操作画布。如果历史只存在浏览器里：
-
-- 用户关掉页面，Agent 改了图，再打开时无法撤销 Agent 的操作。
-- 多标签页各自维护栈，会分叉。
-- 审计日志和撤销日志变成两份。
-
-因此服务端持有 `doc + entries + cursor`，客户端只做镜像。当前用 JSON 文件持久化，生产替换为 Postgres 的 `documents` + `command_log` 两张表即可，接口不变。
+- Agent 在浏览器关闭时也要能操作；
+- 多标签页/多设备需要同一份全序；
+- 审计、计费、安全需要服务端事实；
+- 客户端历史可以被清缓存/篡改。
 
 ---
 
-## 8. 传输协议
+## 9. 客户端 Graph Runtime（signals）
 
-### WebSocket（Web 主通道）
+### 9.1 状态分层
+
+```
+GraphState
+├── nodeSignals: Map<id, Signal<CanvasNode>>       // per-record
+├── runtimeSignals: Map<id, Signal<NodeRuntime>>   // per-record
+├── views: Signal<Record<id, {type, position}>>    // React Flow 几何
+├── edgeViews: Signal<Record<id, EdgeView>>        // React Flow 拓扑
+├── nodeOrder / edgeOrder
+├── history / appliedCount / canUndo / canRedo
+├── selectedIds / dragPositions
+├── runtimeMap / anyRunning
+└── status / activity / toasts / info / tab
+```
+
+- 节点参数变化 → 只改 `nodeSignals[id]`。
+- 生成进度变化 → 只改 `runtimeSignals[id]`。
+- 位置变化 → 只改 `views[id]` / `dragPositions[id]`。
+- 结构变化 → 改 `nodeOrder` / `edgeOrder`。
+- 历史变化 → 改 `history`；`appliedCount` 由 computed 推导。
+
+### 9.2 组件订阅
+
+每个组件调用一次 `useSignals()`（手动模式，不用 Babel transform），然后读 hook 返回的值：
+
+```tsx
+function FlowNode({ id, selected }) {
+  const { node, runtime } = useFlowNodeModel(id)
+  ...
+}
+```
+
+```ts
+export function useFlowNodeModel(id: string) {
+  useSignals()
+  return {
+    node: graph.nodeSignal(id)?.value,
+    runtime: graph.runtimeSignal(id).value,
+  }
+}
+```
+
+- `useCanvasModel` 只读 `nodeOrder / edgeOrder / views / edgeViews / dragPositions / selectedIds`，**不读** node/runtime signal。
+- `FlowNode` 只读自己的 node/runtime signal。
+- `Toolbar` 只读 history / canUndo / canRedo / anyRunning。
+- `HistoryPanel` 只读 history / appliedCount。
+
+### 9.3 拖拽
+
+```
+pointermove
+  → React Flow 内部更新位置
+  → onNodesChange
+  → graph.setDrag(id, position)       // 只改 dragPositions
+  → Canvas 重建 nodes 数组（数据层只动一个坐标）
+  → FlowNode 不重渲染（未读 dragPositions）
+
+pointerup
+  → 一条 node.move
+  → 服务端 patch
+  → graph.applyApplied：更新 views[id]
+  → clearDrag(id)
+```
+
+拖动期间不发 WS、不写文档、不进历史。
+
+### 9.4 为什么用 signals
+
+- 读值即订阅，不需要 selector / shallow compare。
+- `computed` 做派生（appliedCount、anyRunning），值不变不通知。
+- per-record signal 让一个节点的参数/进度只影响该节点。
+- `views` 把 React Flow 需要的几何和业务数据分开，避免 progress 触发全图重建。
+
+---
+
+## 10. 传输协议
+
+### WebSocket
 
 上行：
 
@@ -296,217 +318,127 @@ Agent 在没有浏览器的时候也会操作画布。如果历史只存在浏�
 
 ```ts
 type ServerMessage =
-  | { type: 'snapshot'; doc; history; cursor; runtime }
-  | { type: 'applied'; requestId?; patch; entry?; history?; cursor; ... }
+  | { type: 'snapshot'; doc; history; runtime }
+  | { type: 'applied'; requestId?; patch; entry?; history?; discarded?; undone?; redone?; ... }
   | { type: 'runtime'; nodeId; runtime: NodeRuntime | null }
   | { type: 'command.result'; requestId?; data }
   | { type: 'command.error'; requestId?; error }
   | { type: 'toast'; level; message }
 ```
 
-- `snapshot`：连接 / 重连 / resync 时全量下发。
-- `applied`：普通命令带 `entry`，客户端 append；undo/redo 带完整 `history`，客户端替换。
-- `runtime`：执行面事件，独立消息，永不混进 patch。
-- 发送方通过 `requestId` 关联命令与 `applied`，同时也会收到广播并应用 patch。
+- `snapshot`：连接/重连/resync 全量下发；history 含 applied + undone。
+- `applied`：普通命令带 `entry`；undo/redo 带完整 `history`；新命令截断 redo 时带 `discarded`。
+- `runtime`：执行面，独立消息，不进 patch。
+- 客户端 `requestId` 关联命令与 `applied`。
 
-### HTTP（脚本 / 外部集成）
+### HTTP
 
 - `GET /api/health`
 - `GET /api/info`
 - `GET /api/docs/:docId`
 - `GET /api/docs/:docId/runtime`
-- `POST /api/docs/:docId/commands` （body: `{ command }`）
-- `POST /mcp/:docId` （MCP Streamable HTTP）
+- `POST /api/docs/:docId/commands`
+- `POST /mcp/:docId`
 
-HTTP 命令同样会广播给 WS 客户端。
+HTTP 命令同样广播给 WS 客户端。
 
 ### 认证
 
-- `CANVAS_TOKEN` 为空时开发模式不校验；设置后 HTTP / WS / MCP 都必须带 token（WS 用 `?token=`，HTTP/MCP 用 `Authorization: Bearer`）。
-- MCP 的 `x-actor-id` 写入 `actorId`，当前默认 `agent:external`。生产应换成 OAuth / 每用户 token 映射。
+- `CANVAS_TOKEN` 为空时开发不校验；设置后 HTTP/WS/MCP 都带 token。
+- WS 用 `?token=`，HTTP/MCP 用 `Authorization: Bearer`。
+- MCP 的 `x-actor-id` 写入 `actorId`。
 
 ---
 
-## 9. 执行面
+## 11. 执行面
 
-### Job 状态机
+- Job 状态机：`queued → running → succeeded/failed/canceled`。
+- 当前是模拟执行器；真实实现替换 `runNode`，状态机/签名/stale/取消/事件语义不变。
+- `signature = sha1(type + params + 上游 output hash)`。
+- 成功后把 `inputSignature` 写进 output；之后参数/上游变化 → `stale = true`（只在 runtime）。
+- 删除节点：取消任务、清 runtime。
+- **undo/redo 永不自动创建 job**；恢复被删节点是 idle。
 
-```
-queued → running → succeeded
-                 → failed
-        → canceled（任意阶段）
-```
-
-当前是模拟执行器（`apps/server/src/execution.ts`）：260ms 后进入 running，每 ~460ms 推进 progress，约 4–6 秒完成。真实实现把 `runNode` 替换成队列 + provider adapter，**状态机、签名、stale、取消、事件语义保持不变**。
-
-### 输入签名与 stale
-
-```ts
-signature = sha1(stableStringify({
-  type,
-  params,
-  inputs: incomingEdges.map(e => ({
-    source: e.source,
-    port: e.targetPort,
-    output: runtime[e.source]?.output?.hash ?? null,
-  })),
-}))
-```
-
-- 节点成功时把 `signature` 写进 `output.inputSignature`。
-- 之后任何参数 / 上游产出的变化都会改变当前 signature。
-- 当前 signature ≠ 产出时的 signature → `stale = true`，仅存在于 runtime，不进历史。
-- `undo` 参数修改后，stale 会自动重新计算（因为 signature 回到旧值 → 变回 false）。
-
-### 取消与删除
-
-- 删除节点：先取消该节点的 running/queued job，再删除 runtime entry，广播 `runtime: null`。
-- **undo/redo 永不自动创建 job**。恢复被删节点时是 idle，不是自动重跑——否则一次 Ctrl+Z 可能烧掉几十块。
-- `graph.run` 按拓扑序串行执行（骨架）。生产应改为 DAG 调度，允许并行分支。
-
-### 预算 / 缓存（未实现）
-
-- 预算：`node.run` / `graph.run` 前检查 per-doc / per-agent 额度；昂贵操作要求确认。
-- 缓存：`hash(nodeType, params, 上游输出 hash, 模型版本)` 命中则复用产出，避免 undo/redo 或重复运行重复计费。
-
-这两项是上线前必须补的，已列入里程碑 M2/M3。
+未实现：预算/额度、真实 provider、队列、缓存、run_log。
 
 ---
 
-## 10. MCP 设计
+## 12. MCP
 
-### 端点
+端点：
 
 ```
 POST http://127.0.0.1:8787/mcp/main
-Authorization: Bearer <CANVAS_TOKEN>   // 配置了 token 时
+Authorization: Bearer <CANVAS_TOKEN>
 x-actor-id: agent:my-agent
 ```
 
-使用 Streamable HTTP，无状态模式（每个请求新建 server + transport），`enableJsonResponse: true`。
+工具：
 
-### 工具
+- 读：`get_canvas`、`get_node`、`list_node_types`、`get_job`
+- 写：`add_node`、`update_node`、`move_nodes`、`connect`、`disconnect`、`delete_nodes`、`batch`
+- 运行：`run_node`、`run_graph`、`cancel_job`
+- 撤销：`undo_my_last`（仅本 agent 的栈顶）
 
-**读**
-
-| 工具 | 说明 |
-|---|---|
-| `get_canvas` | 节点、连线、参数、runtime、可撤销/可重做状态 |
-| `get_node` | 单节点详情 |
-| `list_node_types` | 节点类型、端口、参数 JSON Schema |
-| `get_job` | 任务状态 |
-
-**写**
-
-| 工具 | 映射 |
-|---|---|
-| `add_node` | `node.add` |
-| `update_node` | `node.update` |
-| `move_nodes` | `node.move` |
-| `connect` | `edge.connect` |
-| `disconnect` | `edge.disconnect` |
-| `delete_nodes` | `node.delete` |
-| `batch` | `batch`（一次事务） |
-| `run_node` | `node.run` |
-| `run_graph` | `graph.run` |
-| `cancel_job` | `job.cancel` |
-| `undo_my_last` | 仅撤销本 agent 的栈顶 |
-
-### 推荐的 Agent 循环
+推荐循环：
 
 ```
-1. list_node_types        → 了解可用节点与参数 schema
-2. get_canvas             → 读取当前 rev / 节点 / 端口
-3. batch                  → 意图级多步操作（一条历史）
-4. run_node / run_graph   → 拿 jobId
-5. get_job 轮询           → 直到 succeeded / failed
-6. get_canvas             → 确认产出与 stale
+list_node_types → get_canvas → batch → run_node/run_graph → get_job → get_canvas
 ```
 
-### 安全边界
-
-- **不直连存储**：所有写操作经过 Command 校验。
-- **actor 审计**：每条历史带 `actorId`，UI 能显示「Agent 修改了 B.prompt」。
-- **只撤自己**：`undo_my_last` 检查栈顶 `source === 'agent' && actorId === 当前 agent`，否则拒绝。
-- **幂等键**：工具接受 `clientRequestId` 作为 command id（服务端去重尚未实现，见 STATUS）。
-- **预算**：未实现，Agent 触发的生成目前没有额度上限——上线前必须补。
-
-### 两种 MCP 方向
-
-1. **我们作为 MCP Server**（已实现）：外部 Agent 操作画布。
-2. **我们作为 MCP Client**（未实现）：用户配置外部工具（视频模型、素材库）作为节点执行器。这属于 provider adapter，不影响画布 / 历史架构。
+安全：所有写操作走 Command 校验；历史带 source/actor；Agent 只能撤自己的栈顶；预算/幂等未实现。
 
 ---
 
-## 11. 前端实现
+## 13. 反模式
 
-- React 18 + `@xyflow/react` v12 受控模式，`nodes/edges` 从 Zustand 派生。
-- 拖拽：`onNodesChange` 的 position 变化只写入 `dragPositions`（交互面）；`onNodeDragStop` 合并成一条 `node.move`，ack 后清除本地 preview。
-- 文本：属性面板用非受控输入，blur 时提交；不在每次 keystroke 写 store。
-- 选中态在 `ui`，不进入文档。
-- `deleteKeyCode={null}`：删除键由我们处理，必须走 `node.delete` Command，不能绕过历史。
-- 连线：`onConnect` → `edge.connect`；`isValidConnection` 做端口类型预检，服务端仍是最终权威。
-- 撤销/重做：⌘Z / ⇧⌘Z / Ctrl+Y，发送 `history.undo/redo`，不在客户端本地回滚。
-- 断线：自动重连 + snapshot 全量恢复；pending 命令 reject。
+- ❌ 把 status / progress / output 放进 doc 或 history
+- ❌ 监听 store 每次写入做历史
+- ❌ 用 zundo + throttle 猜边界
+- ❌ MCP 直接写数据库 / 绕过 Command
+- ❌ undo 自动重新生成
+- ❌ 客户端本地回滚而不经过服务端
+- ❌ 文档里存 base64
+- ❌ Agent 没有预算 / 审计
+- ❌ 每个字段一个 signal 作为默认建模（见下）
 
-**不用 zundo。** 它是时间/快照驱动的，和「显式事务 + Agent 共用命令日志」的架构冲突。
+### signal 粒度
 
----
+推荐：
 
-## 12. 并发与一致性
+- **记录级**：`nodeSignal(id)` / `runtimeSignal(id)`。
+- **字段级**：`computed(() => nodeSignal(id).value.data.prompt)`，组件读 computed；值不变不重渲染。
+- **瞬态**：drag / hover / progress 单独 signal。
 
-当前：
-
-- 服务端串行应用命令，全局 `rev` 单调递增。
-- 客户端通过 WS 接收所有变更，按序应用 patch。
-- 多标签页天然一致（同一份命令日志）。
-- 用户与 Agent 同时在操作时，最后到达服务端的命令获胜（last-write-wins）。
-
-未实现：
-
-- 字段级 `baseVersion` / 乐观锁。Agent 在 t1 读到 prompt，t2 用户改了 prompt，t3 Agent 基于旧值写回会覆盖用户。
-- 多用户实时协作（Yjs / CRDT）。
-- 冲突时的三方合并。
-
-这些在单人 + 单 Agent 的 MVP 中可以接受，但多 Agent 或多用户前必须补齐。CRDT 不是万能：它的静默合并与「校验后拒绝非法命令」语义冲突，业务校验仍要留在 Command 层。
+不推荐默认给每个字段开 signal：多字段原子性、历史分组、序列化、协作都会变复杂；500 节点不需要靠字段 signal 才能细粒度。
 
 ---
 
-## 13. 反模式清单
-
-- ❌ 把 `status / progress / output` 放进 `CanvasDoc` 或 `HistoryEntry`
-- ❌ 监听 store 每次写入做历史（60 帧问题）
-- ❌ 用 `zundo` + `throttle` 猜边界
-- ❌ MCP 工具直接写数据库 / 绕过 Command 校验
-- ❌ undo 自动重新执行生成任务（费用爆炸）
-- ❌ 客户端本地回滚而不经过服务端（多端分叉）
-- ❌ 文档里存 base64 资产
-- ❌ Agent 没有 actor、预算、审计
-
----
-
-## 14. 当前实现的边界
+## 14. 当前实现边界
 
 | 项 | 现状 | 目标 |
 |---|---|---|
-| 历史顺序 | 严格 LIFO | 支持任意 entry 撤销 + 字段级冲突检测 |
-| 冲突 | 无 | 字段级版本 / 409 + rebase |
-| 持久化 | JSON 文件 | Postgres 文档 + command_log |
-| 执行 | 内存模拟 | 队列 + provider adapter + 重试 |
-| 缓存 / 预算 | 无 | 输入 hash 缓存 + per-agent 额度 |
-| 协作 | 单文档 last-write-wins | 多用户 / 多 Agent，按需 CRDT |
-| MCP 幂等 | 只接受 clientRequestId，未去重 | 命令级去重表 |
-| Run 命令审计 | 无历史 | 独立 run_log（不进 undo） |
+| 历史顺序 | LIFO | 任意点撤销 + 字段级冲突检测 |
+| 冲突 | 无 | 节点/字段版本 + 409 |
+| 持久化 | JSON 文件 | Postgres doc + command_log |
+| 执行 | 模拟 | 队列 + provider adapter |
+| 缓存/预算 | 无 | 输入 hash 缓存 + per-agent 额度 |
+| 协作 | 单文档、在线 | 多用户 / 离线按需 CRDT |
+| MCP 幂等 | 接受 clientRequestId，未去重 | 命令去重表 |
+| Run 审计 | 无 | 独立 run_log（不进 undo） |
 
 ---
 
-## 15. 与初版讨论的差异
+## 15. 与 v0.1 的差异
 
-初版方案里提到「按 source 过滤栈 / 字段级冲突 / Yjs」。v0.1 刻意做了减法：
+| v0.1 | v0.2 |
+|---|---|
+| Zustand 单一 store | `@preact/signals-core` per-record signals |
+| Canvas 全量推导 nodes | views / nodeSignals / runtimeSignals 分层 |
+| `dragPositions` 在全局 store | GraphState 内部 signal |
+| 服务端维护全局 cursor | 服务端只存 log；客户端 cursor |
+| `CanvasEngine` 含历史 | `applyDocumentCommand` + `CommandLog` |
+| 历史无状态 | `applied` / `undone` / `discarded` |
+| 19 tests | 20 tests |
 
-- **统一栈 + source 标记**，不做分栈：实现简单，UI 可见，Agent 的 `undo_my_last` 用栈顶检查即可。
-- **LIFO**，不做任意点撤销：先保证「一次意图 = 一条历史」和「Agent 与用户共用一条栈」正确，再谈随机跳转。
-- **服务端命令日志**从第一天就做：因为 Agent 在没有浏览器时也会写，这个不能后补。
-- **执行器模拟**：先把状态机、签名、stale、取消的语义跑通，真实 provider 只是替换 `finish()` 里的产出逻辑。
-
-下一阶段的优先级见 `docs/STATUS.md`。
+下一阶段优先级见 `docs/STATUS.md`。

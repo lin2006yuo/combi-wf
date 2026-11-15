@@ -1,5 +1,7 @@
 import { Activity, History, SlidersHorizontal } from 'lucide-react'
-import { useAppStore, type PanelTab } from '../store'
+import type { PanelTab } from '../graph/state'
+import { graph } from '../graph/state'
+import { useRightPanelModel } from '../graph/hooks'
 import { Inspector } from './Inspector'
 import { HistoryPanel } from './HistoryPanel'
 import { ActivityPanel } from './ActivityPanel'
@@ -11,10 +13,7 @@ const TABS: Array<{ id: PanelTab; label: string; icon: typeof SlidersHorizontal 
 ]
 
 export function RightPanel() {
-  const tab = useAppStore((state) => state.tab)
-  const setTab = useAppStore((state) => state.setTab)
-  const historyLength = useAppStore((state) => state.history.length)
-  const activityLength = useAppStore((state) => state.activity.length)
+  const { tab, historyCount, activityCount } = useRightPanelModel()
 
   return (
     <aside className="right-panel">
@@ -23,15 +22,15 @@ export function RightPanel() {
           <button
             key={id}
             className={`tab ${tab === id ? 'is-active' : ''}`}
-            onClick={() => setTab(id)}
+            onClick={() => graph.setTab(id)}
           >
             <Icon size={14} />
             {label}
-            {id === 'history' && historyLength > 0 ? (
-              <span className="tab-badge">{historyLength}</span>
+            {id === 'history' && historyCount > 0 ? (
+              <span className="tab-badge">{historyCount}</span>
             ) : null}
-            {id === 'activity' && activityLength > 0 ? (
-              <span className="tab-badge">{activityLength}</span>
+            {id === 'activity' && activityCount > 0 ? (
+              <span className="tab-badge">{activityCount}</span>
             ) : null}
           </button>
         ))}

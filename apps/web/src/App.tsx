@@ -2,7 +2,8 @@ import { useEffect } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { SERVER_URL, fetchInfo } from './api'
 import { startConnection } from './ws'
-import { useAppStore } from './store'
+import { graph } from './graph/state'
+import { useAppModel } from './graph/hooks'
 import { Toolbar } from './components/Toolbar'
 import { Palette } from './components/Palette'
 import { Canvas } from './components/Canvas'
@@ -10,17 +11,16 @@ import { RightPanel } from './components/RightPanel'
 import { Toasts } from './components/Toasts'
 
 export function App() {
-  const doc = useAppStore((state) => state.doc)
-  const status = useAppStore((state) => state.status)
+  const { loaded, status } = useAppModel()
 
   useEffect(() => {
     startConnection()
     fetchInfo()
-      .then((info) => useAppStore.getState().setInfo(info))
+      .then((info) => graph.setInfo(info))
       .catch(() => undefined)
   }, [])
 
-  if (!doc) {
+  if (!loaded) {
     return (
       <div className="boot">
         <div className="boot-mark">C</div>

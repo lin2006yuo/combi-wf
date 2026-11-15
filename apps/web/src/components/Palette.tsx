@@ -1,23 +1,23 @@
 import { useState, type CSSProperties } from 'react'
 import { useReactFlow } from '@xyflow/react'
 import { Bot, Check, Copy, Plus } from 'lucide-react'
-import { useAppStore } from '../store'
 import { registry } from '../registry'
 import { addNode } from '../commands'
 import { MCP_URL } from '../api'
+import { graph } from '../graph/state'
+import { usePaletteModel } from '../graph/hooks'
 import { NodeIcon } from './NodeIcon'
 
 export function Palette() {
   const { screenToFlowPosition } = useReactFlow()
-  const doc = useAppStore((state) => state.doc)
-  const info = useAppStore((state) => state.info)
+  const { nodeCount, info } = usePaletteModel()
 
   const add = (type: string) => {
     const center = screenToFlowPosition({
       x: window.innerWidth * 0.52,
       y: window.innerHeight * 0.48,
     })
-    const offset = (doc?.nodeOrder.length ?? 0) % 5
+    const offset = nodeCount % 5
     void addNode(type, {
       x: Math.round(center.x + offset * 34 - 120),
       y: Math.round(center.y + offset * 26 - 60),
@@ -81,7 +81,8 @@ export function Palette() {
             <code>undo_my_last</code>
           </div>
           <p className="agent-note">
-            每个工具调用都走同一套 Command 校验与历史，与手动操作共用一条撤销栈。
+            服务端持有文档与 change log；前端持有 undo stack。Agent 的每次调用都走同一套 Command
+            校验与审计。
             {info?.tokenRequired ? ' 需要 Bearer token。' : ''}
           </p>
         </div>
@@ -92,7 +93,7 @@ export function Palette() {
           <div className="policy-title">事务策略</div>
           <p>
             拖拽在本地完成，松手只写 <b>1 条</b>历史；Agent 的一次 <code>batch</code> 也只写{' '}
-            <b>1 条</b>。生成进度不进入撤销栈。
+            <b>1 条</b>。生成进度不进入文档。
           </p>
         </div>
       </div>
@@ -109,7 +110,7 @@ function AgentEndpoint() {
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1600)
     } catch {
-      useAppStore.getState().toast('复制失败，请手动选择地址', 'warn')
+      graph.toast('复制失败，请手动选择地址', 'warn')
     }
   }
 

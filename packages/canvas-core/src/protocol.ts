@@ -15,8 +15,8 @@ export type ServerMessage =
 export interface SnapshotMessage {
   type: 'snapshot'
   doc: CanvasDoc
+  /** 包含 applied 与 undone；discarded 不下发 */
   history: HistoryEntry[]
-  cursor: number
   runtime: Record<string, NodeRuntime>
 }
 
@@ -27,14 +27,15 @@ export interface AppliedMessage {
   rev: number
   patch: Patch[]
   entry?: HistoryEntry
-  /** 只有 undo/redo 会带完整历史；普通命令由客户端 append。 */
+  /** undo/redo 时带完整历史；普通命令由客户端 append */
   history?: HistoryEntry[]
-  cursor: number
+  /** 新命令截断 redo 分支时，被丢弃的 entry id */
+  discarded?: string[]
+  undone?: string
+  redone?: string
   changed: boolean
   affected: { nodes: string[]; edges: string[] }
   created: { nodes: string[]; edges: string[] }
-  undone?: string
-  redone?: string
 }
 
 export interface CommandResultMessage {

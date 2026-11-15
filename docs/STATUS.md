@@ -1,79 +1,85 @@
-# 项目状态 · 2026-11-14
+# 项目状态 · 2026-11-15
 
-> 版本：v0.1.0 骨架
-> 分支：`main`（初始提交）
+> 版本：v0.2.0（signals 重构）
 > 设计基线：[`docs/ARCHITECTURE.md`](./ARCHITECTURE.md)
+> 分支：`main`
 
 ---
 
 ## 1. 一句话
 
-一个可运行的 AI 短视频工作流骨架：React Flow 画布 + Command/History 内核 + 服务端命令日志 + 模拟执行引擎 + 可用的 MCP Agent 入口。
-
-当前已经能演示三件关键的事：
-
-1. 拖动 3 秒（几十帧）只产生 **1 条**历史，Ctrl+Z 一次回到起点。
-2. 外部 Agent 通过 MCP 用一次 `batch` 搭建一条链路，用户按 Ctrl+Z 能整体撤销。
-3. 生成进度、输出、stale 只走执行面，**不进入**撤销栈。
+服务端持有 **doc + change log**，前端持有 **undo stack / cursor**；客户端用 **per-record signals** 做细粒度更新，React Flow 只做 renderer adapter。
 
 ![画布](./assets/canvas.png)
 
 ---
 
-## 2. 已落地
+## 2. 本次重构做了什么
 
-### 2.1 `packages/canvas-core`
+### 删除
 
-纯 TypeScript，不依赖浏览器 / Node 内置模块（可被 Web、Server、测试共用）。
+- `apps/web/src/store.ts`（Zustand 单一 store）
+- `packages/canvas-core/src/engine.ts` 与旧 `engine.test.ts`
+- `CanvasEngine` 的全局 cursor 语义
+- `historyLimit` 配置
+- 旧文档数据（不兼容，直接重置）
 
-- [x] `CanvasDoc` 归一化模型、`NodeRuntime` / `HistoryEntry` 类型
-- [x] Node Registry + 三种节点定义（`image.gen` / `video.gen` / `compose`）
-- [x] zod 参数校验、端口类型校验、单/多输入约束、自环/成环检测
-- [x] 文档命令：add / move / update / delete / connect / disconnect / batch
-- [x] 删除节点级联删边，undo 原子恢复
-- [x] Immer patch 历史、cursor、redo 分支截断、历史上限
-- [x] undo / redo 作为 Command
-- [x] `source` / `actorId` / `label` / 幂等 id 字段
-- [x] 19 个单元测试
+### 新增
 
-### 2.2 `apps/server`
-
-- [x] Fastify 5 + CORS + WebSocket
-- [x] 文档快照 / 命令 / runtime 的 HTTP API
-- [x] WS 协议：snapshot / applied / runtime / command.error / resync
-- [x] 多标签页广播；HTTP 命令也会广播给 WS 客户端
-- [x] JSON 文件持久化（doc + history patch + cursor）
-- [x] 模拟执行引擎：queued → running → succeeded、progress、取消
-- [x] 输入签名（参数 + 上游输出 hash）、stale 派生
-- [x] 删除节点时取消任务、清 runtime
-- [x] 本地 SVG mock 资产（不依赖外网图床）
-- [x] MCP Server（Streamable HTTP，无状态）
-- [x] 15 个 MCP 工具：读、写、batch、run、job、undo_my_last
-- [x] 可选 Bearer token（HTTP / WS / MCP）
-- [x] 端到端 demo 脚本 `scripts/agent-demo.ts`
-
-### 2.3 `apps/web`
-
-- [x] React 18 + Vite + Zustand + React Flow 12（受控）
-- [x] 自定义节点：参数摘要、runtime 状态、progress、输出预览、stale 徽标、端口颜色
-- [x] 拖拽本地 preview → 松手一条命令
-- [x] 属性面板：失焦提交，select / switch / number / textarea
-- [x] 历史面板：source 标签、已撤销态、cursor 标记
-- [x] 动态面板：命令 / 撤销 / 生成状态汇总
-- [x] 工具栏：撤销、重做、运行工作流、连接状态、rev
-- [x] Agent 面板：MCP 地址复制、工具提示
-- [x] 自动重连 + snapshot 恢复
-- [x] 深色 UI、节点选中态、toast
-
-### 2.4 文档
-
-- [x] `docs/ARCHITECTURE.md`：三个平面、Command、历史、执行、MCP、并发、反模式
-- [x] `docs/STATUS.md`：本文件
-- [x] `README.md`：快速开始与目录说明
+- `@preact/signals-core` + `@preact/signals-react`（手动 `useSignals`，无 Babel transform）
+- `apps/web/src/graph/state.ts`：GraphState / per-record signals / views / runtime signals
+- `apps/web/src/graph/hooks.ts`：按组件的订阅模型
+- `packages/canvas-core/src/apply.ts`：纯文档变更，不碰历史
+- `packages/canvas-core/src/log.ts`：`CommandLog`，服务端 doc + change log
+- `HistoryEntry.status`：`applied` / `undone` / `discarded`
+- 客户端 undo stack：`appliedCount` / `canUndo` / `canRedo`
+- `history.undo/redo` 按 `entryId` 校验
+- `get_canvas` 的 history 状态、Agent `undo_my_last`
 
 ---
 
-## 3. 如何运行
+## 3. 已落地
+
+### 3.1 `packages/canvas-core`
+
+- [x] 文档模型 / Node Registry / zod 参数校验
+- [x] 端口类型、单/多输入、自环/成环、级联删除
+- [x] `applyDocumentCommand`：纯 patch 应用，无历史副作用
+- [x] `CommandLog`：doc + entries + seq
+- [x] undo / redo 按 entryId，LIFO 校验
+- [x] redo 分支截断：undone → discarded
+- [x] 历史状态与快照序列化
+- [x] 20 个单元测试
+
+### 3.2 `apps/server`
+
+- [x] Fastify 5 + WS + CORS
+- [x] `CommandLog` 权威文档 / 追加式日志
+- [x] JSON 持久化（doc + log + statuses）
+- [x] WS：snapshot / applied / runtime / command.error / resync
+- [x] HTTP：docs / commands / runtime / info / health
+- [x] 模拟执行引擎、progress、取消、stale
+- [x] MCP 15 个工具
+- [x] Agent 端到端 demo
+- [x] 可选 Bearer token
+
+### 3.3 `apps/web`
+
+- [x] React 18 + React Flow 12 + signals
+- [x] `GraphState`：nodeSignals / runtimeSignals / views / edgeViews
+- [x] 手动 `useSignals()`，每个组件只读自己需要的 signal
+- [x] Canvas 不读 node/runtime signal，只读几何/拓扑/拖拽
+- [x] FlowNode 按 id 订阅 node/runtime
+- [x] 拖拽只写 `dragPositions`，松手一条命令
+- [x] 客户端 undo stack / cursor（按 entryId 发命令）
+- [x] 历史面板：applied / undone / discarded 状态
+- [x] Agent 操作与用户共用一条栈，source 标签
+- [x] 自动重连 + snapshot 恢复
+- [x] 深色 UI / toast / 动态面板
+
+---
+
+## 4. 如何运行
 
 ```bash
 pnpm install
@@ -85,22 +91,21 @@ pnpm dev
 - MCP：http://127.0.0.1:8787/mcp/main
 - 健康检查：`GET /api/health`
 
-默认不校验 token。若要开启：
+开启 token：
 
 ```bash
 cp .env.example .env
-# .env 里设置 CANVAS_TOKEN=dev-token
-# Web 需要 VITE_CANVAS_TOKEN=dev-token（Vite 已配置从仓库根读取 .env）
+# CANVAS_TOKEN=dev-token
+# VITE_CANVAS_TOKEN=dev-token
 ```
 
-Agent 端到端验收：
+Agent 验收：
 
 ```bash
-# 先启动 server
 pnpm agent:demo
 ```
 
-测试与构建：
+测试 / 类型 / 构建：
 
 ```bash
 pnpm test
@@ -110,148 +115,145 @@ pnpm --filter @combi/web build
 
 ---
 
-## 4. 验证记录
+## 5. 验证记录
 
 | 项 | 结果 |
 |---|---|
-| `pnpm --filter @combi/canvas-core test` | ✅ 19 passed |
-| `pnpm -r typecheck` | ✅ core / server / web 全部通过 |
-| `pnpm --filter @combi/web build` | ✅ 1642 modules，JS 434KB（gzip 137KB） |
-| MCP demo | ✅ batch 成功、`run_node` 任务 succeeded、产出 runtime |
-| CDP 拖拽测试 | ✅ 15 次 mousemove → 1 条「移动「开场画面」」；⌘Z 后坐标回到 (80,260) |
-| 页面截图 | ✅ 1440×900 正常渲染（`docs/assets/canvas.png`） |
+| `pnpm test` | ✅ 20 passed（CommandLog） |
+| `pnpm -r typecheck` | ✅ core / server / web |
+| `pnpm --filter @combi/web build` | ✅ 1645 modules，JS 443.82KB（gzip 140.65KB） |
+| CDP 拖拽 | ✅ 15 次 mousemove → 1 条「移动「开场画面」」；⌘Z 恢复；⇧⌘Z 重做 |
+| 服务端 undo/redo | ✅ 按 entryId；history status 从 applied → undone → applied |
+| redo 截断 | ✅ undo 后新命令，旧 entry 标记 discarded，redo 返回 `ENTRY_NOT_REDOABLE` |
+| MCP demo | ✅ batch 建链路、run_node succeeded、Agent 节点出现在画布 |
+| 截图 | ✅ 1440×900 |
 
-CDP 拖拽验证的关键结果：
+CDP 拖拽结果：
 
 ```text
-after drag  pos={x:513,y:566} rev=1 history=[移动「开场画面」] cursor=1
-after undo  pos={x:80,y:260}  rev=2 cursor=0 historyLen=1
+after drag pos={x:625,y:596} rev=1 history=[移动「开场画面」:applied]
+after undo pos={x:80,y:260}  rev=2 history=[移动「开场画面」:undone]
+after redo pos={x:625,y:596} rev=3 history=[移动「开场画面」:applied]
 ```
-
-说明：拖动过程中所有 position 变化都被本地 preview 吸收，只有松手时的一条命令进入历史。
 
 ---
 
-## 5. 当前示例数据
+## 6. 当前示例数据
 
-- 首次启动会 seed 三个节点：`n_img`（开场画面）→ `n_vid`（镜头生成）→ `n_out`（成片合成）。
-- 文档与历史落盘在 `apps/server/data/doc-main.json`。
-- **runtime 不持久化**：重启 server 后任务状态 / 输出会清空，文档与历史保留。
-- `apps/server/data/` 已在 `.gitignore` 中。
+- seed：`n_img`（开场画面）→ `n_vid`（镜头生成）→ `n_out`（成片合成）。
+- 文档 + 日志落盘：`apps/server/data/doc-main.json`。
+- runtime 不持久化：重启后 job/output 清空，doc/log 保留。
+- 旧 v0.1 数据不兼容；已重置。
 
-重置为初始示例：
+重置：
 
 ```bash
 rm -f apps/server/data/doc-main.json
 # 重启 server
 ```
 
+注意：server 优雅退出会 flush；重置前先 `kill -9` 或停止后再删。
+
 ---
 
-## 6. 已知限制与技术债
+## 7. 已知限制与技术债
 
-按优先级排序。
+### P0 — 上线前必须
 
-### P0 — 上线前必须解决
+1. **预算 / 额度**：Agent 可以无限触发付费生成。
+2. **命令幂等**：`clientRequestId` 只写入 id，没有服务端去重表。
+3. **并发控制**：没有节点/字段级 `baseVersion`；用户与 Agent 同时改同一字段是 LIFO/覆盖。
+4. **真实执行器**：仍是模拟 provider、无队列/重试/限流。
+5. **持久化**：JSON 单文件，多实例/备份/迁移需要 Postgres。
 
-1. **没有预算 / 额度控制。** Agent 可以无限触发 `run_node` / `run_graph`，真实 provider 会直接产生费用。
-2. **命令幂等未实现。** 工具接受 `clientRequestId` 并写入 command id，但服务端没有去重表；MCP 客户端重试可能重复添加节点 / 重复运行。
-3. **没有乐观并发。** 用户与 Agent 同时改同一节点时是 last-write-wins，Agent 可能用旧值覆盖用户的新值。
-4. **执行器是模拟的。** 还没有真实 provider adapter、队列、重试、超时、限流。
-5. **JSON 单文件持久化。** 只适合单机骨架；多实例、备份、迁移都需要 Postgres。
+### P1 — 正确性 / 体验
 
-### P1 — 体验 / 正确性
-
-6. **历史只支持 LIFO。** 点击历史面板跳转撤销尚未实现；需要字段级版本检测避免覆盖。
-7. **undo 与异步的边界较粗。** 删除运行中的节点会取消任务；undo 恢复节点是 idle，不自动重跑（这是有意设计，但 UI 需要更明确地提示）。
-8. **run 命令没有审计记录。** 目前只有文档命令进历史，run / cancel 没有独立 log。
-9. **边不能选中 / 编辑。** 只能双击删除；缺少边的属性面板与重连。
-10. **属性输入框在 Agent 同时修改时可能被 remount。** 非受控输入的 key 包含参数值，外部变更会重置草稿。
-11. **多选只支持 Shift 点击。** 没有框选；`selectionKeyCode={null}`。
-12. **history limit 默认 100，没有配置界面。**
-13. **MCP 无状态模式。** 每次请求重建 server，不支持 server-initiated notifications / 长连接进度推送；Agent 需要轮询 `get_job`。
+6. **LIFO undo**：不能从历史面板跳到任意点撤销；跨客户端 cursor 冲突只能 409。
+7. **undo/redo 状态是可变字段**：`status` 在服务端可变，不是严格 append-only；审计需要单独的 immutable log。
+8. **runtime 不持久化**：刷新/重启后进度和输出丢失（文档历史保留）。
+9. **多客户端**：共享 log，但每个客户端 cursor 独立；同时撤销可能 409，缺 resync 提示。
+10. **MCP 无状态**：进度靠 `get_job` 轮询，没有 server-initiated notifications。
+11. **历史无上限**：长会话 log 会持续增长；快照/压缩未实现。
+12. **边不能选中/编辑**：只能双击删除。
+13. **无 server/web 自动化测试**：CDP 拖拽是一次性验证，未入库。
 
 ### P2 — 架构演进
 
-14. **没有多用户协作。** 单文档、单写者串行，last-write-wins。
-15. **没有 CRDT。** 如果未来要多人同时拖同一节点，需要 Yjs 或类似方案；但业务校验必须留在 Command 层。
-16. **没有插件化 provider。** 节点执行逻辑写死在 `execution.ts`，下一步应抽象成 adapter。
-17. **没有资源生命周期管理。** mock 资产是 data URI；真实资产需要对象存储、清理、配额。
-18. **测试覆盖不均。** core 有 19 个测试；server / web 还没有自动化测试（CDP 脚本是一次性验证，未入库）。
+14. **离线 / 多人实时编辑**：当前在线、服务端权威；离线需要命令队列或 CRDT。
+15. **provider 插件化**：执行逻辑仍在 `execution.ts`。
+16. **资产生命周期**：mock 是 data URI；真实资产需要对象存储/配额/清理。
+17. **信号调试**：signals 没有 Redux/Zustand 级 devtools；靠命名 + effect 日志。
 
 ---
 
-## 7. 下一步（按顺序）
+## 8. 下一步（按顺序）
 
-### Step 1：把执行面做成真的（M1）
+### Step 1：并发与幂等（M1）
 
-- 抽象 `NodeExecutor` 接口：`execute(ctx) → { output, cost, meta }`。
-- 接入真实 provider（先接 1 个图片、1 个视频），失败重试 / 超时 / 限流。
-- `run` / `cancel` 写独立 `run_log`（不进 undo 历史）。
-- 预算：per-doc / per-agent 额度；超限拒绝并返回明确错误。
-- 验收：一次 `graph.run` 能产生真实资产；花费可查询；删除节点会取消任务。
+- `command_log` 去重：`(docId, commandId) → result`，TTL。
+- 节点级 `version` + `baseRev`；冲突返回 409 + 当前节点。
+- 客户端 409 时自动 resync。
+- 验收：同一 clientRequestId 调用两次只生效一次；并发写同一节点后写者失败。
 
-### Step 2：并发与幂等（M1）
+### Step 2：真实执行器 + 预算（M1）
 
-- 命令去重表：`(docId, commandId) → result`，TTL 24h。
-- 节点级 `version`：写命令带 `baseVersion`，不匹配返回 409 + 当前节点。
-- Agent 工具返回 409 时提示「重新读取后重试」。
-- 验收：同一 `clientRequestId` 调用两次只生效一次；并发改同一节点时后写者被拒绝。
+- `NodeExecutor` 接口 + 1 个图片 + 1 个视频 provider。
+- `run_log` 独立审计（不进 undo）。
+- 预算：per-doc / per-agent；超限拒绝。
+- 验收：真实生成；花费可查；删除节点取消任务。
 
-### Step 3：持久化迁移（M2）
+### Step 3：Postgres 持久化（M2）
 
-- Postgres：`documents`、`command_log`、`run_log`、`assets`。
-- 命令日志按 `seq` 分页；快照每 100 条。
-- 多实例部署：广播换成 Redis pub/sub 或 Postgres LISTEN/NOTIFY。
-- 验收：重启不丢历史；两个 server 实例看到同一文档。
+- `documents` / `command_log` / `run_log` / `assets`。
+- 快照 + 分页；多实例广播。
+- 验收：重启不丢；两个实例看到同一文档。
 
 ### Step 4：历史体验（M2）
 
-- 历史面板支持「撤销到此处」（先只允许 LIFO 的批量 undo）。
+- 历史面板支持「撤销到此处」（仍是 LIFO 批量）。
 - 字段级冲突检测 + 冲突提示。
-- 输入框在外部修改时的「已更新」提示，而不是静默 remount。
-- 验收：用户与 Agent 交替编辑后，撤销不会静默覆盖对方的新值。
+- 输入框外部变更提示，而不是静默 remount。
+- 验收：用户与 Agent 交替编辑后，撤销不静默覆盖。
 
 ### Step 5：Agent 生产化（M3）
 
-- OAuth / 每用户 token 映射到 `actorId` 与 doc 权限（read / write / run）。
-- MCP 进度通知（或 SSE）替代轮询。
-- 工具级权限：read-only agent、禁用 destructive、run 需人工审批。
-- 验收：一个只读 Agent 无法写；一个受限 Agent 无法超预算；所有操作可审计。
+- OAuth / 每用户 token / doc 权限（read / write / run）。
+- MCP 进度通知。
+- 只读 / 受限 / 审批三种模式。
+- 验收：只读 Agent 无法写；受限 Agent 无法超预算；所有操作可审计。
 
 ### Step 6：协作（M4，按需）
 
-- 先做 presence / 光标 / 在线状态。
-- 只有在「多人同时编辑同一字段」成为真实需求时再引入 CRDT。
-- 验收：两人同时编辑不同节点无冲突；同一节点有明确的合并 / 拒绝策略。
+- presence / 光标 / 在线状态。
+- 只有「多人同时编辑同一字段」成为真实需求时再上 CRDT。
+- 验收：多人编辑不同节点无冲突；同节点有明确策略。
 
 ---
 
-## 8. 里程碑
+## 9. 里程碑
 
-| 里程碑 | 状态 | 范围 | 验收标准 |
+| 里程碑 | 状态 | 范围 | 验收 |
 |---|---|---|---|
-| **M0 骨架** | ✅ 2026-11-14 | 三平面、Command、patch 历史、WS、模拟执行、MCP、Web UI | 拖拽 1 条历史；Agent batch 可撤销；测试 / 构建通过 |
-| **M1 可用的单人工作流** | 🔜 下一步 | 真实 provider 1–2 个、run_log、预算、幂等、409 并发 | 能生成真实视频；花费可控；重试不重复；冲突可感知 |
-| **M2 生产基础设施** | ⬜ 计划 | Postgres、Redis、对象存储、快照、多实例 | 重启不丢、可水平扩展、资产可管理 |
-| **M3 Agent 生产化** | ⬜ 计划 | OAuth、权限、审批、进度通知、审计面板 | 只读 / 受限 / 审批三种模式可配置 |
-| **M4 协作** | ⬜ 按需 | presence、多人编辑、按需 CRDT | 多人同时编辑不互相覆盖 |
+| **M0 骨架** | ✅ 2026-11-14 | three planes、Command、patch 历史、MCP、UI | 拖拽 1 条历史；Agent batch 可撤销 |
+| **M1 signals / log 重构** | ✅ 2026-11-15 | signals runtime、CommandLog、客户端 undo stack | 20 tests；CDP 拖拽/undo/redo；MCP demo |
+| **M2 可用的单人工作流** | 🔜 下一步 | 真实 provider、预算、幂等、409、run_log | 真实生成；花费可控；重试不重复 |
+| **M3 生产基础设施** | ⬜ 计划 | Postgres、Redis、对象存储、快照 | 可水平扩展、可恢复 |
+| **M4 Agent 生产化** | ⬜ 计划 | OAuth、权限、审批、进度通知 | 三种权限模式可配置 |
+| **M5 协作** | ⬜ 按需 | presence、多人编辑、按需 CRDT | 不互相覆盖 |
 
 ---
 
-## 9. 需要产品确认的问题
+## 10. 需要产品确认
 
-这些会影响架构，建议在 M1 前定下来：
-
-1. **计费主体**：按用户额度、按文档额度，还是按 workspace？Agent 的花费算谁的？
-2. **Agent 权限模型**：外部 Agent 是「用户的另一个手」，还是「受限协作者」？是否允许删除 / 运行？
-3. **协作范围**：v1 是否需要多人实时编辑？还是「单人 + Agent」就够？
-4. **资产留存**：生成失败的中间产物是否保留？撤销删除的节点，其资产是否保留 / 进入回收站？
-5. **视频节点的真实语义**：首帧图 + 提示词，还是图生视频 / 视频生视频 / 多图参考？这会影响端口类型与执行器接口。
+1. 计费主体：用户 / 文档 / workspace？Agent 花费算谁的？
+2. Agent 权限：能否删除 / 运行 / 超预算？
+3. v1 是否需要多标签/多设备同时操作？
+4. 资产留存：失败中间产物、删除节点的资产是否进回收站？
+5. 视频节点真实语义：首帧图 + prompt，还是图生视频/多图参考？
 
 ---
 
-## 10. 目录结构
+## 11. 目录结构
 
 ```
 combi-wf/
@@ -259,47 +261,46 @@ combi-wf/
 │   ├── server/
 │   │   ├── src/
 │   │   │   ├── index.ts        # Fastify + WS + MCP 路由
-│   │   │   ├── service.ts      # Command 编排 / 广播 / 持久化
-│   │   │   ├── execution.ts    # 模拟执行引擎 + stale
+│   │   │   ├── service.ts      # CommandLog 编排 / 广播
+│   │   │   ├── execution.ts    # 模拟执行 + stale
 │   │   │   ├── store.ts        # JSON 持久化
 │   │   │   ├── mcp.ts          # MCP tools
-│   │   │   ├── seed.ts         # 初始示例画布
-│   │   │   └── ...
+│   │   │   └── seed.ts
 │   │   └── scripts/agent-demo.ts
 │   └── web/
 │       └── src/
+│           ├── graph/
+│           │   ├── state.ts    # GraphState + per-record signals
+│           │   └── hooks.ts    # useSignals 封装
 │           ├── components/     # Canvas / FlowNode / Inspector / History...
-│           ├── store.ts        # doc + ui + runtime 镜像
-│           ├── ws.ts           # 连接 / 重连 / pending
 │           ├── commands.ts     # UI 侧命令封装
+│           ├── ws.ts
 │           └── styles.css
 ├── packages/
 │   └── canvas-core/
 │       └── src/
-│           ├── engine.ts       # 命令应用 + 历史
-│           ├── registry/       # 节点定义
+│           ├── apply.ts        # 纯文档变更
+│           ├── log.ts          # CommandLog
 │           ├── commands.ts
 │           ├── history.ts
-│           └── engine.test.ts
+│           └── log.test.ts
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── STATUS.md
 │   └── assets/canvas.png
-├── package.json
-├── pnpm-workspace.yaml
-└── tsconfig.base.json
+└── ...
 ```
 
 ---
 
-## 11. 风险
+## 12. 风险
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 真实生成费用失控 | 直接亏钱 | M1 预算 + 审批 + 缓存 |
-| Agent 与用户并发覆盖 | 数据丢失 / 信任下降 | M1 节点版本 + 409 |
-| 单文件 JSON 损坏 | 文档丢失 | 立即迁移 Postgres；写临时文件 + rename |
-| 执行状态与文档不一致 | UI 误导 | runtime 只读、签名校验、resync |
-| 节点 schema 演进 | 旧文档参数不合法 | zod 默认值 + 迁移脚本 |
-| MCP token 泄露 | 画布被任意操作 | 短期：token 轮换 + 范围限制；长期：OAuth |
-| 历史语义与用户预期不符 | 「撤销撤错了」 | source 标签、Agent 操作可见、LIFO 明确 |
+| 付费生成失控 | 亏钱 | 预算 + 审批 + 缓存 |
+| Agent/用户并发覆盖 | 数据丢失 | 节点版本 + 409 |
+| 单文件 JSON 损坏 | 文档丢失 | 尽快迁移 Postgres |
+| 历史 status 可变 | 审计不可靠 | 独立 immutable run/command log |
+| 客户端 cursor 分叉 | 撤销失败 | 409 + resync + UI 提示 |
+| signals 漏 `useSignals` | UI 不更新 | 约定 hook、code review、必要时上 transform |
+| 节点 schema 演进 | 旧参数不合法 | zod 默认值 + 迁移脚本 |

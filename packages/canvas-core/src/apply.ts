@@ -1,17 +1,10 @@
-import { applyPatches, enablePatches, produceWithPatches, type Draft, type Patch } from 'immer'
+import { enablePatches, produceWithPatches, type Draft, type Patch } from 'immer'
 import { CanvasError } from './errors'
-import type { HistoryEntry, HistoryState } from './history'
-import type {
-  BatchCommand,
-  Command,
-  DocumentCommand,
-  HistoryRedoCommand,
-  HistoryUndoCommand,
-} from './commands'
+import type { BatchCommand, Command, DocumentCommand } from './commands'
 import { isDocumentCommand } from './commands'
 import type { NodeRegistry } from './registry/registry'
 import type { NodeDefinition, PortDef } from './registry/types'
-import type { CanvasDoc, CanvasNode, MediaType, Source, Vec2 } from './types'
+import type { CanvasDoc, CanvasNode, MediaType, Vec2 } from './types'
 
 enablePatches()
 
@@ -77,7 +70,7 @@ function canReach(doc: CanvasDoc, from: string, to: string): boolean {
   return false
 }
 
-interface OpOutcome {
+export interface OpOutcome {
   label: string
   nodes: string[]
   edges: string[]
@@ -394,253 +387,28 @@ function applyOp(
   }
 }
 
-export interface EngineSnapshot {
+export interface ApplyResult {
   doc: CanvasDoc
-  entries: HistoryEntry[]
-  cursor: number
-  seq: number
+  patches: Patch[]
+  inverse: Patch[]
+  outcome: OpOutcome
 }
 
-export interface CanvasEngineOptions {
-  doc: CanvasDoc
-  registry: NodeRegistry
-  historyLimit?: number
-  now?: () => number
-}
-
-export interface ExecuteResult {
-  commandId: string
-  rev: number
-  patch: Patch[]
-  cursor: number
-  changed: boolean
-  entry?: HistoryEntry
-  history?: HistoryState
-  undone?: string
-  redone?: string
-  affected: { nodes: string[]; edges: string[] }
-  created: { nodes: string[]; edges: string[] }
-}
-
-export interface ExecuteMeta {
-  source?: Source
-  actorId?: string
-}
-
-export class CanvasEngine {
-  private doc: CanvasDoc
-  private entries: HistoryEntry[]
-  private cursor: number
-  private seq: number
-  private readonly registry: NodeRegistry
-  private readonly historyLimit: number
-  private readonly now: () => number
-
-  constructor(options: CanvasEngineOptions & Partial<EngineSnapshot>) {
-    this.doc = options.doc
-    this.registry = options.registry
-    this.entries = options.entries ?? []
-    this.cursor = Math.max(0, Math.min(options.cursor ?? this.entries.length, this.entries.length))
-    this.seq = options.seq ?? this.entries.reduce((max, entry) => Math.max(max, entry.seq), 0)
-    this.historyLimit = Math.max(1, options.historyLimit ?? 100)
-    this.now = options.now ?? (() => Date.now())
+/**
+ * 只做文档变更，不碰历史。
+ * 历史 / 撤销策略在 CommandLog 里，服务端和前端可以各自决定怎么用。
+ */
+export function applyDocumentCommand(
+  doc: CanvasDoc,
+  command: DocumentCommand,
+  registry: NodeRegistry,
+): ApplyResult {
+  let outcome: OpOutcome | undefined
+  const [nextDoc, patches, inverse] = produceWithPatches(doc, (draft) => {
+    outcome = applyOp(draft, command, registry)
+  })
+  if (!outcome) {
+    throw new CanvasError('INVALID_COMMAND', '命令没有产生结果')
   }
-
-  static fromSnapshot(
-    registry: NodeRegistry,
-    snapshot: EngineSnapshot,
-    options?: Omit<CanvasEngineOptions, 'doc' | 'registry'>,
-  ): CanvasEngine {
-    return new CanvasEngine({ ...options, registry, ...snapshot })
-  }
-
-  getDoc(): CanvasDoc {
-    return this.doc
-  }
-
-  getHistory(): HistoryState {
-    return { entries: this.entries, cursor: this.cursor }
-  }
-
-  getCursor(): number {
-    return this.cursor
-  }
-
-  toSnapshot(): EngineSnapshot {
-    return {
-      doc: this.doc,
-      entries: this.entries,
-      cursor: this.cursor,
-      seq: this.seq,
-    }
-  }
-
-  execute(input: Command, meta: ExecuteMeta = {}): ExecuteResult {
-    const id = input.id ?? newId('c')
-    const ts = input.ts ?? this.now()
-    const source = input.source ?? meta.source ?? 'user'
-    const actorId = input.actorId ?? meta.actorId
-
-    if (input.type === 'history.undo') {
-      return this.undo(input, id, ts, source, actorId)
-    }
-    if (input.type === 'history.redo') {
-      return this.redo(input, id, ts, source, actorId)
-    }
-
-    if (!isDocumentCommand(input)) {
-      throw new CanvasError(
-        'INVALID_COMMAND',
-        `${input.type} 不是文档命令，应由执行引擎处理`,
-      )
-    }
-
-    let outcome: OpOutcome | undefined
-    const [nextDoc, patches, inversePatches] = produceWithPatches(this.doc, (draft) => {
-      outcome = applyOp(draft, input, this.registry)
-    })
-
-    if (!outcome) {
-      throw new CanvasError('INVALID_COMMAND', '命令没有产生结果')
-    }
-
-    if (patches.length === 0) {
-      return {
-        commandId: id,
-        rev: this.doc.rev,
-        patch: [],
-        cursor: this.cursor,
-        changed: false,
-        affected: { nodes: [], edges: [] },
-        created: { nodes: [], edges: [] },
-      }
-    }
-
-    this.seq += 1
-    const entry: HistoryEntry = {
-      id,
-      seq: this.seq,
-      docId: this.doc.id,
-      type: input.type,
-      source,
-      actorId,
-      label: input.label ?? outcome.label,
-      forward: patches,
-      inverse: inversePatches,
-      nodes: unique(outcome.nodes),
-      edges: unique(outcome.edges),
-      ts,
-    }
-
-    this.entries = this.entries.slice(0, this.cursor)
-    this.entries.push(entry)
-    this.cursor = this.entries.length
-    while (this.entries.length > this.historyLimit) {
-      this.entries.shift()
-      this.cursor -= 1
-    }
-    this.cursor = Math.max(0, this.cursor)
-
-    this.doc = { ...nextDoc, rev: this.doc.rev + 1 }
-
-    return {
-      commandId: id,
-      rev: this.doc.rev,
-      patch: patches,
-      cursor: this.cursor,
-      changed: true,
-      entry,
-      affected: { nodes: unique(outcome.nodes), edges: unique(outcome.edges) },
-      created: {
-        nodes: unique(outcome.createdNodes),
-        edges: unique(outcome.createdEdges),
-      },
-    }
-  }
-
-  private undo(
-    command: HistoryUndoCommand,
-    id: string,
-    ts: number,
-    source: Source,
-    actorId?: string,
-  ): ExecuteResult {
-    const entry = this.entries[this.cursor - 1]
-    if (!entry) {
-      throw new CanvasError('NOTHING_TO_UNDO', '没有可撤销的操作')
-    }
-    const requested = command.payload?.entryId
-    if (requested && requested !== entry.id) {
-      throw new CanvasError(
-        'OUT_OF_ORDER_UNDO',
-        '当前只支持按顺序撤销（LIFO）；请先撤销更新的操作',
-        { requested, top: entry.id },
-      )
-    }
-
-    const nextDoc = applyPatches(this.doc, entry.inverse)
-    this.doc = { ...nextDoc, rev: this.doc.rev + 1 }
-    this.cursor -= 1
-
-    void ts
-    void source
-    void actorId
-
-    return {
-      commandId: id,
-      rev: this.doc.rev,
-      patch: entry.inverse,
-      cursor: this.cursor,
-      changed: true,
-      history: { entries: this.entries, cursor: this.cursor },
-      undone: entry.id,
-      affected: { nodes: entry.nodes, edges: entry.edges },
-      created: { nodes: [], edges: [] },
-    }
-  }
-
-  private redo(
-    command: HistoryRedoCommand,
-    id: string,
-    ts: number,
-    source: Source,
-    actorId?: string,
-  ): ExecuteResult {
-    const entry = this.entries[this.cursor]
-    if (!entry) {
-      throw new CanvasError('NOTHING_TO_REDO', '没有可重做的操作')
-    }
-
-    const nextDoc = applyPatches(this.doc, entry.forward)
-    this.doc = { ...nextDoc, rev: this.doc.rev + 1 }
-    this.cursor += 1
-
-    void command
-    void ts
-    void source
-    void actorId
-
-    return {
-      commandId: id,
-      rev: this.doc.rev,
-      patch: entry.forward,
-      cursor: this.cursor,
-      changed: true,
-      history: { entries: this.entries, cursor: this.cursor },
-      redone: entry.id,
-      affected: { nodes: entry.nodes, edges: entry.edges },
-      created: { nodes: [], edges: [] },
-    }
-  }
-}
-
-export function createEmptyDoc(id: string): CanvasDoc {
-  return {
-    id,
-    rev: 0,
-    nodes: {},
-    edges: {},
-    nodeOrder: [],
-    edgeOrder: [],
-  }
+  return { doc: nextDoc, patches, inverse, outcome }
 }

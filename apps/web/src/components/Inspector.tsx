@@ -1,8 +1,8 @@
 import { AlertTriangle, ExternalLink, Loader2, Play, SlidersHorizontal, Trash2 } from 'lucide-react'
 import type { FieldDef, NodeRuntime } from '@combi/canvas-core'
-import { useAppStore } from '../store'
 import { registry } from '../registry'
 import { deleteNodes, runNode, updateNode } from '../commands'
+import { useInspectorModel } from '../graph/hooks'
 import { NodeIcon } from './NodeIcon'
 
 const STATUS_TEXT: Record<string, string> = {
@@ -14,11 +14,7 @@ const STATUS_TEXT: Record<string, string> = {
 }
 
 export function Inspector() {
-  const doc = useAppStore((state) => state.doc)
-  const selectedIds = useAppStore((state) => state.selectedIds)
-  const runtimeMap = useAppStore((state) => state.runtime)
-  const id = selectedIds[0]
-  const node = id ? doc?.nodes[id] : undefined
+  const { selectedIds, node, runtime } = useInspectorModel()
 
   if (!node) {
     return (
@@ -44,9 +40,7 @@ export function Inspector() {
   }
 
   const def = registry.get(node.type)
-  const runtime = runtimeMap[node.id]
   const busy = runtime?.status === 'queued' || runtime?.status === 'running'
-  const output = runtime?.output
 
   const commit = (key: string, value: unknown) => {
     void updateNode(node.id, { [key]: value })

@@ -1,18 +1,12 @@
-import type { CSSProperties, MouseEvent } from 'react'
+import { memo, type CSSProperties, type MouseEvent } from 'react'
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react'
 import { Image as ImageIcon, Loader2, Play } from 'lucide-react'
-import type { NodeRuntime } from '@combi/canvas-core'
 import { registry } from '../registry'
 import { runNode } from '../commands'
+import { useFlowNodeModel } from '../graph/hooks'
 import { NodeIcon } from './NodeIcon'
 
-export type WorkflowNodeData = Record<string, unknown> & {
-  label: string
-  nodeType: string
-  params: Record<string, unknown>
-  runtime?: NodeRuntime | null
-}
-
+export type WorkflowNodeData = Record<string, unknown>
 export type WorkflowNode = Node<WorkflowNodeData, string>
 
 const STATUS_TEXT: Record<string, string> = {
@@ -31,10 +25,12 @@ const PORT_COLOR: Record<string, string> = {
   any: '#94a3b8',
 }
 
-export function FlowNode({ id, data, selected }: NodeProps<WorkflowNode>) {
-  const def = registry.get(data.nodeType)
-  const params = data.params ?? {}
-  const runtime = data.runtime ?? undefined
+export const FlowNode = memo(function FlowNode({ id, selected }: NodeProps<WorkflowNode>) {
+  const { node, runtime } = useFlowNodeModel(id)
+  if (!node) return null
+
+  const def = registry.get(node.type)
+  const params = node.data.params
   const status = runtime?.status
   const busy = status === 'queued' || status === 'running'
   const prompt = typeof params.prompt === 'string' ? params.prompt : ''
@@ -93,8 +89,8 @@ export function FlowNode({ id, data, selected }: NodeProps<WorkflowNode>) {
           <NodeIcon name={def.ui.icon} size={16} />
         </span>
         <div className="node-title-wrap">
-          <div className="node-label" title={data.label}>
-            {data.label}
+          <div className="node-label" title={node.data.label}>
+            {node.data.label ?? def.title}
           </div>
           <div className="node-type">
             {def.title}
@@ -102,15 +98,16 @@ export function FlowNode({ id, data, selected }: NodeProps<WorkflowNode>) {
             <span className="node-id">{id}</span>
           </div>
         </div>
-        <span className={`node-status-dot ${status ?? 'idle'}`} title={STATUS_TEXT[status ?? ''] ?? '未运行'} />
+        <span
+          className={`node-status-dot ${status ?? 'idle'}`}
+          title={STATUS_TEXT[status ?? ''] ?? '未运行'}
+        />
       </div>
 
       <div className="node-body">
         {prompt ? <p className="node-prompt">{prompt}</p> : null}
         {!prompt && def.category === 'compose' ? (
-          <p className="node-prompt muted">
-            {chips.join(' · ') || '按连线顺序拼接片段'}
-          </p>
+          <p className="node-prompt muted">{chips.join(' · ') || '按连线顺序拼接片段'}</p>
         ) : null}
         {chips.length > 0 && prompt ? (
           <div className="node-chips">
@@ -156,18 +153,13 @@ export function FlowNode({ id, data, selected }: NodeProps<WorkflowNode>) {
           {STATUS_TEXT[status ?? ''] ?? '未运行'}
           {runtime?.stale ? ' · stale' : ''}
         </span>
-        <button
-          className="node-run nodrag"
-          onClick={run}
-          disabled={busy}
-          title="运行此节点"
-        >
+        <button className="node-run nodrag" onClick={run} disabled={busy} title="运行此节点">
           {busy ? <Loader2 size={13} className="spin" /> : <Play size={13} />}
         </button>
       </div>
     </div>
   )
-}
+})
 
 function chip(
   fields: Array<{

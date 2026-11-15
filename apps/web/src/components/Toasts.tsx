@@ -1,9 +1,9 @@
 import { AlertTriangle, CheckCircle2, Info, X } from 'lucide-react'
-import { useAppStore } from '../store'
+import { graph } from '../graph/state'
+import { useToastsModel } from '../graph/hooks'
 
 export function Toasts() {
-  const toasts = useAppStore((state) => state.toasts)
-  const dismiss = useAppStore((state) => state.dismissToast)
+  const { toasts } = useToastsModel()
 
   if (toasts.length === 0) return null
 
@@ -23,7 +23,11 @@ export function Toasts() {
             )}
           </span>
           <span className="toast-message">{toast.message}</span>
-          <button className="toast-close" onClick={() => dismiss(toast.id)} aria-label="关闭">
+          <button
+            className="toast-close"
+            onClick={() => graph.dismissToast(toast.id)}
+            aria-label="关闭"
+          >
             <X size={13} />
           </button>
         </div>

@@ -16,7 +16,7 @@ import { createMcpServer } from './mcp'
 import { sanitizeDocId } from './util'
 
 const registry = createDefaultRegistry()
-const store = new DocStore(config.dataDir, registry, config.historyLimit)
+const store = new DocStore(config.dataDir, registry)
 const hub = new Hub()
 const execution = new ExecutionService({
   registry,

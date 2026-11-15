@@ -14,6 +14,10 @@ export type CanvasErrorCode =
   | 'NOTHING_TO_UNDO'
   | 'NOTHING_TO_REDO'
   | 'OUT_OF_ORDER_UNDO'
+  | 'OUT_OF_ORDER_REDO'
+  | 'ENTRY_NOT_FOUND'
+  | 'ENTRY_NOT_UNDOABLE'
+  | 'ENTRY_NOT_REDOABLE'
   | 'INVALID_BATCH'
 
 export class CanvasError extends Error {

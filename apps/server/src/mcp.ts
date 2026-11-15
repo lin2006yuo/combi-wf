@@ -51,7 +51,7 @@ export function createMcpServer(
   docId: string,
   actorId: string,
 ): McpServer {
-  const server = new McpServer({ name: 'combi-canvas', version: '0.1.0' })
+  const server = new McpServer({ name: 'combi-canvas', version: '0.2.0' })
 
   const execute = (command: Command) =>
     service.execute(docId, command, { source: 'agent', actorId })
@@ -109,10 +109,10 @@ export function createMcpServer(
             }
           }),
           history: {
-            entries: history.entries.length,
-            cursor: history.cursor,
-            canUndo: history.cursor > 0,
-            canRedo: history.cursor < history.entries.length,
+            applied: history.filter((entry) => entry.status === 'applied').length,
+            undone: history.filter((entry) => entry.status === 'undone').length,
+            canUndo: history.some((entry) => entry.status === 'applied'),
+            canRedo: history.some((entry) => entry.status === 'undone'),
           },
         }
       }),
@@ -415,7 +415,8 @@ export function createMcpServer(
     async () =>
       guard(async () => {
         const history = service.getHistory(docId)
-        const top = history.entries[history.cursor - 1]
+        const applied = history.filter((entry) => entry.status === 'applied')
+        const top = applied[applied.length - 1]
         if (!top) throw new CanvasError('NOTHING_TO_UNDO', '没有可撤销的操作')
         if (top.source !== 'agent' || top.actorId !== actorId) {
           throw new CanvasError(
@@ -425,7 +426,7 @@ export function createMcpServer(
         }
         const result = await service.execute(
           docId,
-          { type: 'history.undo' },
+          { type: 'history.undo', payload: { entryId: top.id } },
           { source: 'undo', actorId },
         )
         return summarize(result)
@@ -445,7 +446,10 @@ function summarize(result: Awaited<ReturnType<CanvasService['execute']>>) {
     affected: result.result.affected,
     created: result.result.created,
     history: result.result.history
-      ? { cursor: result.result.history.cursor, entries: result.result.history.entries.length }
+      ? {
+          applied: result.result.history.filter((entry) => entry.status === 'applied').length,
+          undone: result.result.history.filter((entry) => entry.status === 'undone').length,
+        }
       : undefined,
   }
 }

@@ -1,5 +1,5 @@
 import { Activity, Cpu, Redo2, Undo2 } from 'lucide-react'
-import { useAppStore } from '../store'
+import { useActivityModel } from '../graph/hooks'
 
 const SOURCE_LABEL: Record<string, string> = {
   user: '你',
@@ -9,7 +9,7 @@ const SOURCE_LABEL: Record<string, string> = {
 }
 
 export function ActivityPanel() {
-  const activity = useAppStore((state) => state.activity)
+  const { activity } = useActivityModel()
 
   if (activity.length === 0) {
     return (

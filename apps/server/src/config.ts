@@ -15,7 +15,6 @@ export interface ServerConfig {
   host: string
   dataDir: string
   token?: string
-  historyLimit: number
 }
 
 export const config: ServerConfig = {
@@ -23,5 +22,4 @@ export const config: ServerConfig = {
   host: process.env.HOST ?? '127.0.0.1',
   dataDir: process.env.DATA_DIR ?? './data',
   token: process.env.CANVAS_TOKEN || undefined,
-  historyLimit: Number(process.env.HISTORY_LIMIT ?? 100),
 }

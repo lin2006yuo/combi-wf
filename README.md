@@ -7,12 +7,13 @@ AI 短视频工作流画布：图片 → 视频 → 组合输出，支持撤销 
 ## 这个骨架想证明什么
 
 1. **一次意图 = 一条历史。** 拖动节点产生的几十帧坐标变化只留在浏览器本地，松手才写入一条 `node.move`；Ctrl+Z 一次回到起点。
-2. **Agent 和用户共用同一条命令日志。** 外部 Agent 通过 MCP 调用 `batch` 搭建链路，用户按 Ctrl+Z 能整体撤销；历史面板会标明来源。
+2. **Agent 和用户共用同一条命令日志。** 服务端持有 doc + change log，前端持有 undo stack / cursor；外部 Agent 通过 MCP 调用 `batch` 搭建链路，用户按 Ctrl+Z 能整体撤销；历史面板会标明来源。
 3. **生成状态不进撤销栈。** job、progress、output、stale 属于执行面，只通过 WS 推送，永不写进文档或历史。
+4. **细粒度更新。** 节点参数、runtime、位置、结构各自是独立的 signal；改一个字段不会重建整张图。
 
 ## 技术栈
 
-- Web：React 18、Vite 7、Zustand 5、React Flow 12、Immer
+- Web：React 18、Vite 7、`@preact/signals-core` / `@preact/signals-react`、React Flow 12、Immer
 - Server：Node 20+、Fastify 5、`@modelcontextprotocol/sdk`、zod
 - 共享内核：`packages/canvas-core`（纯 TypeScript，可单测）
 
@@ -38,7 +39,7 @@ cp .env.example .env
 ## 常用脚本
 
 ```bash
-pnpm test                 # canvas-core 单测（19 个）
+pnpm test                 # canvas-core 单测（20 个）
 pnpm -r typecheck         # core / server / web
 pnpm --filter @combi/web build
 pnpm agent:demo           # 需要先启动 server；模拟外部 Agent 通过 MCP 操作画布
@@ -47,12 +48,20 @@ pnpm agent:demo           # 需要先启动 server；模拟外部 Agent 通过 M
 ## 目录
 
 ```
-apps/web                 React Flow 画布 + 属性 / 历史 / 动态面板
+apps/web                 Graph Runtime（signals）+ React Flow adapter + 属性 / 历史 / 动态
 apps/server              Command 编排、WS、JSON 持久化、模拟执行、MCP
-packages/canvas-core     文档模型、Node Registry、校验、命令、patch 历史
+packages/canvas-core     文档模型、Node Registry、校验、apply、CommandLog
 docs/ARCHITECTURE.md     设计基线
 docs/STATUS.md           当前状态、技术债、下一步、里程碑
 ```
+
+## 状态更新模型
+
+- **服务端**：`CommandLog` 持有 `doc` + 追加式 `history`；每次命令生成 forward/inverse patch 和 `seq`。
+- **前端**：`GraphState` 用 per-record signal 保存节点、runtime、视图几何；`history` 是服务端 change log 的镜像，`cursor` 由 applied 数量推导。
+- **撤销**：前端发 `{ type: 'history.undo', payload: { entryId } }`；服务端校验栈顶并应用 inverse，广播 patch + history。
+- **React Flow**：只消费 `nodeOrder / edgeOrder / views / edgeViews`；不把 params/runtime 塞进 `node.data`。
+- **订阅**：每个组件手动调用一次 `useSignals()`，只读自己需要的 signal；没有 Babel transform。
 
 ## 手动试一下
 
@@ -111,6 +120,7 @@ curl -X POST http://127.0.0.1:8787/api/docs/main/commands \
 - 执行器是模拟的（本地 SVG 产出），还没有接真实视频模型。
 - 没有预算 / 额度、命令幂等、字段级并发控制。
 - 历史只支持 LIFO；JSON 单文件持久化；runtime 重启即清空。
+- `history.status` 可变（applied/undone/discarded），严格审计需要独立 immutable log。
 - 单人 + 单 Agent 场景，尚未做多人协作。
 
 完整清单和里程碑见 [docs/STATUS.md](./docs/STATUS.md)；设计取舍见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。

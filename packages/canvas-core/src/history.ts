@@ -1,6 +1,8 @@
 import type { Patch } from 'immer'
 import type { Source } from './types'
 
+export type HistoryStatus = 'applied' | 'undone' | 'discarded'
+
 export interface HistoryEntry {
   id: string
   seq: number
@@ -15,9 +17,10 @@ export interface HistoryEntry {
   nodes: string[]
   edges: string[]
   ts: number
-}
-
-export interface HistoryState {
-  entries: HistoryEntry[]
-  cursor: number
+  /**
+   * applied：当前生效
+   * undone：已撤销、可重做
+   * discarded：撤销后被新操作截断，不再出现在历史里
+   */
+  status: HistoryStatus
 }
